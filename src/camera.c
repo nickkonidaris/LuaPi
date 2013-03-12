@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <Windows.h>
+#include <direct.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -33,11 +34,8 @@ static char months[13][15] = {"", "jan", "feb", "mar",
 static char path_prefix[STR_BUF_SIZE] = "\\sedm";
 
 struct metadata {
-	piflt exptime;
-	piflt adcspeed;
-	piint bitdepth;
-	piint gain;
-	piint adc;
+	piflt exptime, adcspeed, temp;
+	piint bitdepth, gain, adc;
 	PicamCameraID *id;
 };
 
@@ -53,53 +51,7 @@ static void set_amplifier(PicamHandle model, PicamAdcQuality amplifier, lua_Stat
 static void set_adc_speed(PicamHandle model, piflt adc_speed, lua_State *L);
 static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L);
 static BOOL DirectoryExists(LPCTSTR szPath);
-static long get_file_number(char *outdir);
 
-
-/* Following taken from http://stackoverflow.com/questions/2314542/listing-directory-contents-using-c-and-windows */
-static long get_file_number(char *outdir)
-{
-	WIN32_FIND_DATA fdFile;
-    HANDLE hFind = NULL;
-
-    LPCTSTR sPath = "C:\\*.txt";
-
-	printf("Target is: %s\n", sPath);
-	hFind = FindFirstFile(sPath, &fdFile);
-	if(hFind == INVALID_HANDLE_VALUE) {
-		printf("Findfirst failed (%d)\n", GetLastError());
-		return -1;
-	} else{
-		printf("Found: %s\n", fdFile.cFileName);
-		return;
-	}
-    do
-    {
-        //Find first file will always return "."
-        //    and ".." as the first two directories.
-        if(strcmp(fdFile.cFileName, ".") != 0
-                && strcmp(fdFile.cFileName, "..") != 0)
-        {
-            //Build up our file path using the passed in
-            //  [outdir] and the file/foldername we just found:
-            sprintf(sPath, "%s\\%s", outdir, fdFile.cFileName);
-
-            //Is the entity a File or Folder?
-            if(fdFile.dwFileAttributes &FILE_ATTRIBUTE_DIRECTORY)
-            {
-                printf("Directory: %s\n", sPath);
-            }
-            else{
-                printf("File: %s\n", sPath);
-            }
-        }
-    }
-    while(FindNextFile(hFind, &fdFile)); //Find the next file.
-
-    FindClose(hFind); //Always, Always, clean things up!
-
-	return 1;
-}
 
 static BOOL DirectoryExists(LPCTSTR szPath)
 {
@@ -114,11 +66,12 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 {
 	fitsfile *ff;
 	int status = 0, retcode = 0;
-	int bitpix = 16;
-	long naxes[2] = {2048, 2048}, file_num;
+	long naxes[2] = {2048, 2048};
 	char outdir[STR_BUF_SIZE];
 	char outfile[STR_BUF_SIZE];
+	float bscale1 = 1.0, bzero32768 = 32768.0;
 	SYSTEMTIME str_t;
+
 
 
 	/* Create output directory */
@@ -129,17 +82,16 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 		str_t.wYear, months[str_t.wMonth], str_t.wDay);
 
 	printf("%s\n\n", outdir);
-	if(!DirectoryExists(outdir)) {
+	if(!DirectoryExists((LPCTSTR) outdir)) {
 		printf("Creating directory %s\n", outdir);
 		
-		if(!mkdir(outdir, 0)) {
+		if(!mkdir(outdir)) {
 			lua_pushstring(L,"Could not create path\n");
 			lua_error(L);
 			return;
 		}
 	}
 
-	file_num = get_file_number(outdir);
 
 	sprintf_s(outfile, STR_BUF_SIZE, "!%s\\s%4.4d%2.2d%2.2d_%2.2i_%2.2i_%2.2i.fits", outdir,str_t.wYear,
 		str_t.wMonth, str_t.wDay, str_t.wHour, str_t.wMinute, str_t.wSecond);
@@ -157,7 +109,7 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 
 
 	retcode = fits_create_img(ff, 
-		bitpix, // bitpix
+		SHORT_IMG , // bitpix
 		2, // naxis
 		naxes, // naxes
 		&status);
@@ -168,11 +120,19 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 		fits_close_file(ff, &status);
 		return;
 	}
-
-	
+		
+	// Following line is required to handle ushort, see:
+	// "Support for Unsigned Integers and Signed Bytes" in
+	// cfitsio manual
+	fits_write_key(ff, TFLOAT, "BSCALE", &bscale1, NULL, &status);
+	fits_write_key(ff, TFLOAT, "BZERO", &bzero32768, NULL, &status);
+	fits_set_bscale(ff, 1, //BSCALE Factor
+						32768, // BZERO factor
+						&status); 
 
 	fits_write_key(ff, TDOUBLE, "EXPTIME", &md->exptime, "Exposure time in s", &status);
 	fits_write_key(ff, TDOUBLE, "ADCSPEED", &md->adcspeed, "Readout speed in MHz", &status);
+	fits_write_key(ff, TDOUBLE, "TEMP", &md->temp, "Detector temp in deg C", &status);
 	fits_write_key(ff, TINT, "BITDEPTH", &md->bitdepth, "Bit depth", &status);
 	fits_write_key(ff, TINT, "GAIN_SET", &md->gain, "Gain 1: low, 2: medium, 3: high ", &status);
 	fits_write_key(ff, TINT, "ADC", &md->gain, "1: Low noise, 2: high capacity",  &status);
@@ -181,21 +141,24 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 	fits_write_key(ff, TSTRING, "SNSR_NM", &md->id->sensor_name, "PI sensor name", &status);
 	fits_write_key(ff, TSTRING, "SER_NO", &md->id->serial_number, "PI serial #", &status);
 
+	printf("Reported BD is %i\n", md->bitdepth);
 	retcode = fits_write_img(ff,
 		TUSHORT, // (T)ype is unsigned short (USHORT)
 		1, // Copy from [0, 0] but fits format is indexed by 1
 		naxes[0] * naxes[1], // Number of elements
 		buf,
 		&status);
-
-	if(retcode) {
+	if(retcode && status==412) {
+		printf("Overflow\n");
+	} else if(retcode) {
 		lua_pushstring(L,"Could not copy data over \n");
 		fits_report_error(stderr, status);
 		lua_error(L);
 		fits_close_file(ff, &status);
 		return;
 	}
-	
+
+
 	fits_close_file(ff, &status);
 
 }
@@ -231,7 +194,7 @@ static PicamCameraID lua_table_to_camera(lua_State *L, int index, PicamHandle *h
 		lua_pushstring(L, "Serial number string length is too large");
 		lua_error(L);
 	}
-	strncpy(id.serial_number, str, len);
+	strncpy_s(id.serial_number, PicamStringSize_SerialNumber, str, len);
 
 	///////
 	lua_pushstring(L, "sensor");
@@ -242,7 +205,7 @@ static PicamCameraID lua_table_to_camera(lua_State *L, int index, PicamHandle *h
 		lua_pushstring(L, "Sensor name string length is too large");
 		lua_error(L);
 	}
-	strncpy(id.sensor_name, str, len);
+	strncpy_s(id.sensor_name, PicamStringSize_SensorName, str, len);
 
 	printf("Interface: %i, model: %i, serial: %s, sensor: %s\n", 
 		id.computer_interface, id.model, id.serial_number, id.sensor_name);
@@ -535,6 +498,8 @@ int picam_acquire(lua_State *L)
 	Picam_GetParameterIntegerValue( handle, PicamParameter_AdcBitDepth, &md.bitdepth );
 	Picam_GetParameterIntegerValue( handle, PicamParameter_AdcAnalogGain, &md.gain );
 	Picam_GetParameterIntegerValue( handle, PicamParameter_AdcQuality, &md.adc );
+	Picam_GetParameterFloatingPointValue( handle, PicamParameter_SensorTemperatureReading, &md.temp );
+	
 	md.id = &id;
 
 
