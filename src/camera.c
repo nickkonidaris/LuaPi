@@ -12,6 +12,9 @@
 #include <time.h>
 #include <string.h>
 #include <stdio.h>
+#include <Windows.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "fitsio.h"
 #include "camera.h"
@@ -21,6 +24,14 @@
 
 
 /* Local function declarations */
+#define STR_BUF_SIZE 2048
+
+static char months[13][15] = {"", "jan", "feb", "mar", 
+	"apr", "may", "jun", "jul", "aug", "sep", 
+	"oct", "nov", "dec"};
+
+static char path_prefix[STR_BUF_SIZE] = "\\sedm";
+
 struct metadata {
 	piflt exptime;
 	piflt adcspeed;
@@ -31,6 +42,8 @@ struct metadata {
 };
 
 
+
+
 static void camera_to_lua_table(lua_State *L,  PicamCameraID available);
 static PicamCameraID lua_table_to_camera(lua_State *L, int index, PicamHandle *handle);
 static void set_exposure_time(PicamHandle model, piflt exptime_s, lua_State *L);
@@ -39,17 +52,101 @@ static void set_gain(PicamHandle model, PicamAdcAnalogGain gain, lua_State *L);
 static void set_amplifier(PicamHandle model, PicamAdcQuality amplifier, lua_State *L);
 static void set_adc_speed(PicamHandle model, piflt adc_speed, lua_State *L);
 static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L);
+static BOOL DirectoryExists(LPCTSTR szPath);
+static long get_file_number(char *outdir);
+
+
+/* Following taken from http://stackoverflow.com/questions/2314542/listing-directory-contents-using-c-and-windows */
+static long get_file_number(char *outdir)
+{
+	WIN32_FIND_DATA fdFile;
+    HANDLE hFind = NULL;
+
+    LPCTSTR sPath = "C:\\*.txt";
+
+	printf("Target is: %s\n", sPath);
+	hFind = FindFirstFile(sPath, &fdFile);
+	if(hFind == INVALID_HANDLE_VALUE) {
+		printf("Findfirst failed (%d)\n", GetLastError());
+		return -1;
+	} else{
+		printf("Found: %s\n", fdFile.cFileName);
+		return;
+	}
+    do
+    {
+        //Find first file will always return "."
+        //    and ".." as the first two directories.
+        if(strcmp(fdFile.cFileName, ".") != 0
+                && strcmp(fdFile.cFileName, "..") != 0)
+        {
+            //Build up our file path using the passed in
+            //  [outdir] and the file/foldername we just found:
+            sprintf(sPath, "%s\\%s", outdir, fdFile.cFileName);
+
+            //Is the entity a File or Folder?
+            if(fdFile.dwFileAttributes &FILE_ATTRIBUTE_DIRECTORY)
+            {
+                printf("Directory: %s\n", sPath);
+            }
+            else{
+                printf("File: %s\n", sPath);
+            }
+        }
+    }
+    while(FindNextFile(hFind, &fdFile)); //Find the next file.
+
+    FindClose(hFind); //Always, Always, clean things up!
+
+	return 1;
+}
+
+static BOOL DirectoryExists(LPCTSTR szPath)
+{
+  DWORD dwAttrib = GetFileAttributes(szPath);
+
+  return (dwAttrib != INVALID_FILE_ATTRIBUTES && 
+         (dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
 
 static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 {
-	PicamError error;
 	fitsfile *ff;
 	int status = 0, retcode = 0;
 	int bitpix = 16;
-	long naxes[2] = {2048, 2048};
+	long naxes[2] = {2048, 2048}, file_num;
+	char outdir[STR_BUF_SIZE];
+	char outfile[STR_BUF_SIZE];
+	SYSTEMTIME str_t;
+
+
+	/* Create output directory */
+	GetLocalTime(&str_t);
+	printf("Yr: %d, Month: %d/%s date: %d\n", str_t.wYear, str_t.wMonth, months[str_t.wMonth], str_t.wDay);
 	
-	
-	retcode = fits_create_file(&ff, "!C:\\sedm\\out.fits", &status);
+	sprintf_s(outdir, STR_BUF_SIZE, "%s\\%4d%s%2d", path_prefix,
+		str_t.wYear, months[str_t.wMonth], str_t.wDay);
+
+	printf("%s\n\n", outdir);
+	if(!DirectoryExists(outdir)) {
+		printf("Creating directory %s\n", outdir);
+		
+		if(!mkdir(outdir, 0)) {
+			lua_pushstring(L,"Could not create path\n");
+			lua_error(L);
+			return;
+		}
+	}
+
+	file_num = get_file_number(outdir);
+
+	sprintf_s(outfile, STR_BUF_SIZE, "!%s\\s%4.4d%2.2d%2.2d_%2.2i_%2.2i_%2.2i.fits", outdir,str_t.wYear,
+		str_t.wMonth, str_t.wDay, str_t.wHour, str_t.wMinute, str_t.wSecond);
+
+
+	/* FITS housekeeping */
+	retcode = fits_create_file(&ff, outfile, &status);
 
 	if(retcode) {
 		lua_pushstring(L,"Could not create FITS file\n");
@@ -57,7 +154,8 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 		lua_error(L);
 		return;
 	}
-	
+
+
 	retcode = fits_create_img(ff, 
 		bitpix, // bitpix
 		2, // naxis
@@ -70,6 +168,8 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 		fits_close_file(ff, &status);
 		return;
 	}
+
+	
 
 	fits_write_key(ff, TDOUBLE, "EXPTIME", &md->exptime, "Exposure time in s", &status);
 	fits_write_key(ff, TDOUBLE, "ADCSPEED", &md->adcspeed, "Readout speed in MHz", &status);
