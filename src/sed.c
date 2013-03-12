@@ -2,6 +2,8 @@
 ** $Id: lua.c,v 1.205 2012/05/23 15:37:09 roberto Exp $
 ** Lua stand-alone interpreter
 ** See Copyright Notice in lua.h
+
+* Modified by nick konidaris for Princeton - LUA Bridge
 */
 
 
@@ -490,6 +492,7 @@ int main (int argc, char **argv) {
   lua_register(L, "pi_start", picam_start);
   lua_register(L, "pi_list", picam_list);
   lua_register(L, "pi_acquire", picam_acquire);
+  lua_register(L, "pi_set", picam_set);
 
 
   /* call 'pmain' in protected mode */
