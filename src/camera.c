@@ -42,14 +42,14 @@ struct metadata {
 
 
 
-static void camera_to_lua_table(lua_State *L,  PicamCameraID available);
+static void camera_to_lua_table(lua_State *L,  PicamCameraID available, PicamHandle handle);
 static PicamCameraID lua_table_to_camera(lua_State *L, int index, PicamHandle *handle);
 static void set_exposure_time(PicamHandle model, piflt exptime_s, lua_State *L);
 static void set_exposure_time(PicamHandle model, piflt exptime_s, lua_State *L);
 static void set_gain(PicamHandle model, PicamAdcAnalogGain gain, lua_State *L);
 static void set_amplifier(PicamHandle model, PicamAdcQuality amplifier, lua_State *L);
 static void set_adc_speed(PicamHandle model, piflt adc_speed, lua_State *L);
-static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L);
+static void write_data_to_file(pi16u * buf, struct metadata * md, char * prepend, lua_State *L);
 static BOOL DirectoryExists(LPCTSTR szPath);
 
 
@@ -62,7 +62,7 @@ static BOOL DirectoryExists(LPCTSTR szPath)
 }
 
 
-static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
+static void write_data_to_file(pi16u * buf, struct metadata * md, char * prepend, lua_State *L)
 {
 	fitsfile *ff;
 	int status = 0, retcode = 0;
@@ -72,16 +72,12 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 	float bscale1 = 1.0, bzero32768 = 32768.0;
 	SYSTEMTIME str_t;
 
-
-
 	/* Create output directory */
 	GetLocalTime(&str_t);
-	printf("Yr: %d, Month: %d/%s date: %d\n", str_t.wYear, str_t.wMonth, months[str_t.wMonth], str_t.wDay);
 	
 	sprintf_s(outdir, STR_BUF_SIZE, "%s\\%4d%s%2d", path_prefix,
 		str_t.wYear, months[str_t.wMonth], str_t.wDay);
 
-	printf("%s\n\n", outdir);
 	if(!DirectoryExists((LPCTSTR) outdir)) {
 		printf("Creating directory %s\n", outdir);
 		
@@ -93,9 +89,8 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 	}
 
 
-	sprintf_s(outfile, STR_BUF_SIZE, "!%s\\s%4.4d%2.2d%2.2d_%2.2i_%2.2i_%2.2i.fits", outdir,str_t.wYear,
-		str_t.wMonth, str_t.wDay, str_t.wHour, str_t.wMinute, str_t.wSecond);
-
+	sprintf_s(outfile, STR_BUF_SIZE, "!%s\\%s%4.4d%2.2d%2.2d_%2.2i_%2.2i_%2.2i.fits", outdir, prepend, 
+		str_t.wYear, str_t.wMonth, str_t.wDay, str_t.wHour, str_t.wMinute, str_t.wSecond);
 
 	/* FITS housekeeping */
 	retcode = fits_create_file(&ff, outfile, &status);
@@ -134,14 +129,14 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 	fits_write_key(ff, TDOUBLE, "ADCSPEED", &md->adcspeed, "Readout speed in MHz", &status);
 	fits_write_key(ff, TDOUBLE, "TEMP", &md->temp, "Detector temp in deg C", &status);
 	fits_write_key(ff, TINT, "BITDEPTH", &md->bitdepth, "Bit depth", &status);
-	fits_write_key(ff, TINT, "GAIN_SET", &md->gain, "Gain 1: low, 2: medium, 3: high ", &status);
-	fits_write_key(ff, TINT, "ADC", &md->gain, "1: Low noise, 2: high capacity",  &status);
+	fits_write_key(ff, TINT, "GAIN_SET", &md->gain, "1: low, 2: medium, 3: high gain", &status);
+	fits_write_key(ff, TINT, "ADC", &md->adc, "1: Low noise, 2: high capacity",  &status);
 	fits_write_key(ff, TINT, "MODEL", &md->id->model, "PI Model #", &status);
 	fits_write_key(ff, TINT, "INTERFC", &md->id->computer_interface, "PI Computer Interface", &status);
 	fits_write_key(ff, TSTRING, "SNSR_NM", &md->id->sensor_name, "PI sensor name", &status);
 	fits_write_key(ff, TSTRING, "SER_NO", &md->id->serial_number, "PI serial #", &status);
 
-	printf("Reported BD is %i\n", md->bitdepth);
+
 	retcode = fits_write_img(ff,
 		TUSHORT, // (T)ype is unsigned short (USHORT)
 		1, // Copy from [0, 0] but fits format is indexed by 1
@@ -160,7 +155,7 @@ static void write_data_to_file(pi16u * buf, struct metadata * md, lua_State *L)
 
 
 	fits_close_file(ff, &status);
-
+	printf("Wrote '%s'.\n", outfile);
 }
 
 static PicamCameraID lua_table_to_camera(lua_State *L, int index, PicamHandle *handle)
@@ -212,13 +207,8 @@ static PicamCameraID lua_table_to_camera(lua_State *L, int index, PicamHandle *h
 	return id;
 }
 
-static void camera_to_lua_table(lua_State *L,  PicamCameraID available)
+static void camera_to_lua_table(lua_State *L,  PicamCameraID available, PicamHandle handle)
 {
-
-	PicamHandle handle;
-
-	Picam_OpenCamera(&available, &handle);
-
 	lua_newtable(L);
 	lua_pushstring(L, "handle");
 	lua_pushinteger(L, (int) handle);
@@ -468,13 +458,31 @@ int picam_list(lua_State *L)
 									available[i].sensor_name, 
 									available[i].serial_number);
 
-		camera_to_lua_table(L, available[i]);
+		camera_to_lua_table(L, available[i], 0);
 		lua_rawseti(L, -2, i);
 	}
 
 	Picam_DestroyCameraIDs( available );
 	return 1;
 }
+
+int picam_open(lua_State *L)
+{
+	PicamHandle handle;
+	PicamCameraID id;
+
+	id = lua_table_to_camera(L, 1, &handle);
+
+	// Open camera ID and return handle
+	Picam_OpenCamera(&id, &handle);
+
+	printf("Camera opened\n");
+
+	camera_to_lua_table(L, id, handle);
+
+	return 1;
+}
+
 
 int picam_acquire(lua_State *L)
 {
@@ -487,10 +495,13 @@ int picam_acquire(lua_State *L)
 	clock_t tick, tock;
 	struct metadata md;
 	pi16u * buf;
+	char * prepend;
 
 
 	tick = clock();
 	id = lua_table_to_camera(L, 1, &handle);
+	prepend = lua_tostring(L, 2);
+	printf("Prepend: %s\n", prepend);
 
 	Picam_GetParameterFloatingPointValue( handle, PicamParameter_ExposureTime, &md.exptime );
 	md.exptime /= 1000;
@@ -517,10 +528,7 @@ int picam_acquire(lua_State *L)
 		lua_pushstring(L, "More than 1 count found");
 		lua_error(L);
 	}
-	write_data_to_file(buf, &md, L);
-	printf("High: %d\n", *(buf+2048*2000+1000));
-	printf("Middle: %d\n", *(buf+2048*1000+1000));
-	printf("Low: %d\n", *(buf+2048*10+1000));
+	write_data_to_file(buf, &md, prepend, L);
 	printf("Acquisition took %5.2f s\n", ((float) tock-tick)/CLOCKS_PER_SEC);
 	return 0;
 }

@@ -22,6 +22,7 @@
 #include "camera.h"
 
 
+
 #if !defined(LUA_PROMPT)
 #define LUA_PROMPT		"SEDM> "
 #define LUA_PROMPT2		"SEDM>> "
@@ -493,6 +494,7 @@ int main (int argc, char **argv) {
   lua_register(L, "pi_list", picam_list);
   lua_register(L, "pi_acquire", picam_acquire);
   lua_register(L, "pi_set", picam_set);
+  lua_register(L, "pi_open", picam_open);
 
 
   /* call 'pmain' in protected mode */

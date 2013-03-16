@@ -18,6 +18,9 @@ int picam_acquire(lua_State *L);
 /* pi_set(avail, exptime, gain, ??) */
 int picam_set(lua_State *L);
 
+/* pi_open(avail) */
+int picam_open(lua_State *L);
+
 
 
 #endif
